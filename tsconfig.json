@@ -1,0 +1,21 @@
+{
+  "extends": "@tsconfig/node22",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true
+  },
+  "files": ["prettier.config.js", "eslint.config.js"],
+  "references": [
+    { "path": "./tsconfig.scripts.json" },
+    { "path": "./packages/cli-utils/tsconfig.json" },
+    { "path": "./packages/cmake-file-api/tsconfig.json" },
+    { "path": "./packages/cmake-file-api/tsconfig.tests.json" },
+    { "path": "./packages/host/tsconfig.json" },
+    { "path": "./packages/gyp-to-cmake/tsconfig.json" },
+    { "path": "./packages/cmake-rn/tsconfig.json" },
+    { "path": "./packages/ferric/tsconfig.json" },
+    { "path": "./packages/node-addon-examples/tsconfig.json" },
+    { "path": "./packages/node-tests/tsconfig.json" },
+    { "path": "./packages/weak-node-api/tsconfig.json" }
+  ]
+}

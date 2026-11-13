@@ -1,0 +1,38 @@
+{
+  "name": "ferric-cli",
+  "version": "0.4.6",
+  "description": "Rust Node-API Modules for React Native",
+  "homepage": "https://github.com/callstackincubator/react-native-node-api",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/callstackincubator/react-native-node-api.git",
+    "directory": "packages/ferric"
+  },
+  "type": "module",
+  "files": [
+    "bin",
+    "dist",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.test.d.ts.map",
+    "templates"
+  ],
+  "bin": {
+    "ferric": "./bin/ferric.js"
+  },
+  "scripts": {
+    "start": "tsx src/run.ts",
+    "test": "tsx --test --test-reporter=@reporters/github --test-reporter-destination=stdout --test-reporter=spec --test-reporter-destination=stdout"
+  },
+  "dependencies": {
+    "@napi-rs/cli": "~3.10.8",
+    "@react-native-node-api/cli-utils": "workspace:*",
+    "react-native-node-api": "workspace:*",
+    "semver": "^7.8.5",
+    "smol-toml": "^1.8.0",
+    "weak-node-api": "workspace:*",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@types/semver": "^7.8.0"
+  }
+}

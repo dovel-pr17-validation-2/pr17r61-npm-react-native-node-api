@@ -1,0 +1,93 @@
+// @ts-check
+
+import { globalIgnores } from "eslint/config";
+import globals from "globals";
+import eslint from "@eslint/js";
+import tseslint from "typescript-eslint";
+import eslintConfigPrettier from "eslint-config-prettier/flat";
+
+export default tseslint.config(
+  globalIgnores([
+    "**/dist/**",
+    "**/build/**",
+    "**/build-tests/**",
+    "apps/test-app/ios/**",
+    "apps/macos-test-app/**",
+    "packages/host/hermes/**",
+    "packages/node-addon-examples/examples/**",
+    "packages/ferric-example/ferric_example.js",
+    "packages/ferric-example/ferric_example.d.ts",
+    "packages/ferric-example/target/**",
+    "packages/cmake-rn-example/cmake-rn-example.js",
+    "packages/cmake-rn-example/cmake-rn-example.d.ts",
+    "packages/node-tests/node/**",
+    "packages/node-tests/tests/**",
+    "packages/node-tests/*.generated.js",
+    "packages/node-tests/*.generated.d.ts",
+  ]),
+  eslint.configs.recommended,
+  tseslint.configs.recommendedTypeChecked,
+  {
+    rules: {
+      "@typescript-eslint/no-floating-promises": [
+        "error",
+        {
+          allowForKnownSafeCalls: [
+            { from: "package", name: ["suite", "test"], package: "node:test" },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+  eslintConfigPrettier,
+  {
+    files: [
+      "apps/test-app/*.js",
+      "apps/macos-test-app/*.js",
+      "packages/node-addon-examples/**/*.js",
+      "packages/host/babel-plugin.js",
+      "packages/host/react-native.config.js",
+      "packages/node-tests/tests.generated.js",
+    ],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: {
+      parserOptions: {
+        sourceType: "commonjs",
+      },
+      globals: {
+        ...globals.commonjs,
+        // Timers provided by React Native's runtime, where these files run.
+        setTimeout: "readonly",
+        setImmediate: "readonly",
+      },
+    },
+    rules: {
+      // We're using CommonJS here for Node.js backwards compatibility
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
+    files: [
+      "**/metro.config.js",
+      "packages/gyp-to-cmake/bin/*.js",
+      "packages/host/bin/*.mjs",
+      "packages/host/scripts/*.mjs",
+      "packages/ferric/bin/*.js",
+      "packages/cmake-rn/bin/*.js",
+    ],
+    extends: [tseslint.configs.disableTypeChecked],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+);

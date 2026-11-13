@@ -1,0 +1,44 @@
+{
+  "name": "@react-native-node-api/node-addon-examples",
+  "version": "0.1.2",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "examples/**/package.json",
+    "examples/**/*.js",
+    "tests/**/package.json",
+    "tests/**/*.js",
+    "**/*.apple.node/**",
+    "**/*.android.node/**"
+  ],
+  "private": true,
+  "homepage": "https://github.com/callstackincubator/react-native-node-api",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/callstackincubator/react-native-node-api.git",
+    "directory": "packages/node-addon-examples"
+  },
+  "scripts": {
+    "copy-examples": "tsx scripts/copy-examples.mts",
+    "gyp-to-cmake": "gyp-to-cmake --namespaced-targets --weak-node-api .",
+    "generate-root-project": "tsx scripts/generate-root-project.mts",
+    "build": "cmake-rn --configuration RelWithDebInfo",
+    "copy-and-build": "node --run copy-examples && node --run gyp-to-cmake && node --run generate-root-project && node --run build",
+    "verify": "tsx scripts/verify-prebuilds.mts",
+    "test": "node --run copy-and-build && node --run verify",
+    "bootstrap": "node --run copy-and-build"
+  },
+  "devDependencies": {
+    "cmake-rn": "workspace:*",
+    "gyp-to-cmake": "workspace:*",
+    "node-addon-examples": "github:nodejs/node-addon-examples#4b7dd86a85644610e6de80154df9acac9329b509",
+    "read-pkg": "^9.0.1",
+    "weak-node-api": "workspace:*"
+  },
+  "dependencies": {
+    "assert": "^2.1.0",
+    "react-native-node-api": "workspace:*",
+    "zod": "^4.1.11"
+  }
+}

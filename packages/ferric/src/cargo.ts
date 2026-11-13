@@ -1,0 +1,326 @@
+import assert from "node:assert/strict";
+import cp from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  chalk,
+  assertFixable,
+  UsageError,
+  spawn,
+} from "@react-native-node-api/cli-utils";
+import { applePrebuildPath, androidPrebuildPath } from "weak-node-api";
+import * as z from "zod";
+
+import {
+  AndroidTargetName,
+  AppleTargetName,
+  isAndroidTarget,
+  isAppleTarget,
+  isThirdTierTarget,
+} from "./targets.js";
+
+/**
+ * A per apple target mapping to a list of xcframework slices in order of priority
+ */
+const APPLE_XCFRAMEWORK_SLICES_PER_TARGET: Record<AppleTargetName, string[]> = {
+  "aarch64-apple-darwin": [
+    "macos-arm64_x86_64", // Universal
+    "macos-arm64",
+  ],
+  "x86_64-apple-darwin": [
+    "macos-arm64_x86_64", // Universal
+    "macos-x86_64",
+  ],
+
+  "aarch64-apple-ios": ["ios-arm64"],
+  "aarch64-apple-ios-sim": [
+    "ios-arm64_x86_64-simulator", // Universal
+    "ios-arm64-simulator",
+  ],
+  "x86_64-apple-ios": [
+    "ios-arm64_x86_64-simulator", // Universal
+    "ios-x86_64-simulator",
+  ],
+
+  "aarch64-apple-visionos": ["xros-arm64"],
+  "aarch64-apple-visionos-sim": [
+    "xros-arm64_x86_64-simulator", // Universal
+    "xros-arm64-simulator",
+  ],
+  // The x86_64 target for vision simulator isn't supported
+  // see https://doc.rust-lang.org/rustc/platform-support.html
+
+  "aarch64-apple-tvos": ["tvos-arm64"],
+  "aarch64-apple-tvos-sim": [
+    "tvos-arm64_x86_64-simulator", // Universal
+    "tvos-arm64-simulator",
+  ],
+  "x86_64-apple-tvos": [
+    "tvos-arm64_x86_64-simulator", // Universal
+    "tvos-x86_64-simulator",
+  ],
+
+  // "aarch64-apple-ios-macabi": "", // Catalyst
+  // "x86_64-apple-ios-macabi": "ios-x86_64-simulator",
+};
+
+const ANDROID_ARCH_PR_TARGET: Record<AndroidTargetName, string> = {
+  "aarch64-linux-android": "arm64-v8a",
+  "armv7-linux-androideabi": "armeabi-v7a",
+  "i686-linux-android": "x86",
+  "x86_64-linux-android": "x86_64",
+};
+
+export function joinPathAndAssertExistence(...pathSegments: string[]) {
+  const joinedPath = path.join(...pathSegments);
+  assert(fs.existsSync(joinedPath), `Expected ${joinedPath} to exist`);
+  return joinedPath;
+}
+
+export function ensureCargo() {
+  try {
+    const cargoVersion = cp
+      .execFileSync("cargo", ["--version"], {
+        encoding: "utf-8",
+      })
+      .trim();
+    console.log(chalk.dim(`Using ${cargoVersion}`));
+  } catch (error) {
+    throw new UsageError(
+      "You need a Rust toolchain: https://doc.rust-lang.org/cargo/getting-started/installation.html#install-rust-and-cargo",
+      { cause: error },
+    );
+  }
+}
+
+const CargoMetadataSchema = z.object({
+  target_directory: z.string(),
+  packages: z.array(
+    z.object({
+      manifest_path: z.string(),
+      targets: z.array(
+        z.object({ name: z.string(), kind: z.array(z.string()) }),
+      ),
+    }),
+  ),
+});
+
+export function getCargoMetadata(cwd: string) {
+  const output = cp.execFileSync(
+    "cargo",
+    ["metadata", "--no-deps", "--format-version", "1"],
+    { cwd, encoding: "utf-8" },
+  );
+  return CargoMetadataSchema.parse(JSON.parse(output));
+}
+
+/**
+ * Determine the name of the crate's "cdylib" target, without building anything,
+ * by asking cargo for its metadata. This matches the basename a full build would
+ * produce (e.g. "ferric_example" for a crate named "ferric-example"), since cargo
+ * normalizes the crate name (dashes to underscores) for the compiled artifact.
+ */
+export function determineCargoLibraryName(cwd: string): string {
+  const { packages } = getCargoMetadata(cwd);
+  const manifestPath = fs.realpathSync(path.join(cwd, "Cargo.toml"));
+  // Metadata lists every workspace member, but cargo only builds the current one
+  const currentPackage = packages.find(
+    (pkg) => fs.realpathSync(pkg.manifest_path) === manifestPath,
+  );
+  const cdylibNames = (currentPackage ? [currentPackage] : packages)
+    .flatMap((pkg) => pkg.targets)
+    .filter((target) => target.kind.includes("cdylib"))
+    .map((target) => target.name);
+  const candidates = new Set(cdylibNames);
+  assert(
+    candidates.size === 1,
+    `Expected exactly one cdylib target, got: ${[...candidates].join(", ")}`,
+  );
+  const [name] = candidates;
+  return name;
+}
+
+type BuildOptions = {
+  configuration: "debug" | "release";
+  verbose: boolean;
+  cwd: string;
+} & (
+  | {
+      target: AndroidTargetName;
+      ndkVersion: string;
+      androidApiLevel: number;
+    }
+  | {
+      target: AppleTargetName;
+      ndkVersion?: never;
+      androidApiLevel?: number;
+    }
+);
+
+export async function build(options: BuildOptions) {
+  const { target, configuration, verbose, cwd } = options;
+  const args = ["build", "--target", target];
+  if (configuration.toLowerCase() === "release") {
+    args.push("--release");
+  }
+  if (isThirdTierTarget(target)) {
+    // Use the nightly toolchain for third tier targets
+    args.splice(0, 0, "+nightly");
+    // Passing the nightly "build-std" to
+    // > Enable Cargo to compile the standard library itself as part of a crate graph compilation
+    // See https://doc.rust-lang.org/rustc/platform-support/apple-visionos.html#building-the-target
+    args.push("-Z", "build-std=std,panic_abort");
+  }
+  await spawn("cargo", args, {
+    cwd,
+    outputMode: verbose ? "inherit" : "buffered",
+    outputPrefix: verbose ? chalk.dim(`[${target}]`) : undefined,
+    env: {
+      ...process.env,
+      ...getTargetEnvironmentVariables(options),
+    },
+  });
+  const targetOutputPath = joinPathAndAssertExistence(
+    getCargoMetadata(cwd).target_directory,
+    target,
+    configuration,
+  );
+  const libraryName = determineCargoLibraryName(cwd);
+  return joinPathAndAssertExistence(
+    targetOutputPath,
+    `lib${libraryName}.${isAndroidTarget(target) ? "so" : "dylib"}`,
+  );
+}
+
+export function getLLVMToolchainBinPath(ndkPath: string) {
+  const prebuiltPath = path.join(ndkPath, "toolchains", "llvm", "prebuilt");
+  const candidates = fs.readdirSync(prebuiltPath);
+  if (candidates.length === 0) {
+    throw new Error("Expected LLVM toolchain to be installed");
+  } else if (candidates.length > 1) {
+    throw new Error("Expected a single LLVM toolchain to be installed");
+  } else {
+    return path.join(prebuiltPath, candidates[0], "bin");
+  }
+}
+
+export function getTargetAndroidArch(target: AndroidTargetName) {
+  const [first] = target.split("-");
+  return first === "armv7" ? "armv7a" : first;
+}
+
+export function getTargetAndroidPlatform(target: AndroidTargetName) {
+  return getTargetAndroidArch(target) === "armv7a"
+    ? "androideabi24"
+    : "android24";
+}
+
+export function getWeakNodeApiFrameworkPath(target: AppleTargetName) {
+  const result = APPLE_XCFRAMEWORK_SLICES_PER_TARGET[target].find((slice) => {
+    const candidatePath = path.join(applePrebuildPath, slice);
+    return fs.existsSync(candidatePath);
+  });
+  assert(
+    result,
+    `No matching slice found in weak-node-api.xcframework for target ${target}`,
+  );
+  return joinPathAndAssertExistence(applePrebuildPath, result);
+}
+
+export function getWeakNodeApiAndroidLibraryPath(target: AndroidTargetName) {
+  return joinPathAndAssertExistence(
+    androidPrebuildPath,
+    ANDROID_ARCH_PR_TARGET[target],
+  );
+}
+
+export function getTargetEnvironmentVariables({
+  target,
+  ndkVersion,
+  androidApiLevel,
+}: BuildOptions): Record<string, string> {
+  if (isAndroidTarget(target)) {
+    assert(ndkVersion, "Expected ndkVersion to be set for Android targets");
+
+    const { ANDROID_HOME } = process.env;
+    assertFixable(
+      ANDROID_HOME && fs.existsSync(ANDROID_HOME),
+      `Missing ANDROID_HOME environment variable`,
+      {
+        instructions: "Set ANDROID_HOME to the Android SDK directory",
+      },
+    );
+    const ndkPath = path.join(ANDROID_HOME, "ndk", ndkVersion);
+    assertFixable(fs.existsSync(ndkPath), `Expected NDK at ${ndkPath}`, {
+      command: `sdkmanager --install "ndk;${ndkVersion}"`,
+    });
+
+    const toolchainBinPath = getLLVMToolchainBinPath(ndkPath);
+    const targetArch = getTargetAndroidArch(target);
+    const targetPlatform = getTargetAndroidPlatform(target);
+    const weakNodeApiPath = getWeakNodeApiAndroidLibraryPath(target);
+    const cmdMaybe = process.platform === "win32" ? ".cmd" : "";
+    const exeMaybe = process.platform === "win32" ? ".exe" : "";
+
+    return {
+      CARGO_ENCODED_RUSTFLAGS: [
+        "-L",
+        weakNodeApiPath,
+        "-C",
+        // Passing --no-as-needed to prevent weak-node-api from being optimized away
+        "link-arg=-Wl,--push-state,--no-as-needed,-lweak-node-api,--pop-state",
+      ].join(String.fromCharCode(0x1f)),
+      CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: joinPathAndAssertExistence(
+        toolchainBinPath,
+        `aarch64-linux-android${androidApiLevel}-clang${cmdMaybe}`,
+      ),
+      CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: joinPathAndAssertExistence(
+        toolchainBinPath,
+        `armv7a-linux-androideabi${androidApiLevel}-clang${cmdMaybe}`,
+      ),
+      CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: joinPathAndAssertExistence(
+        toolchainBinPath,
+        `x86_64-linux-android${androidApiLevel}-clang${cmdMaybe}`,
+      ),
+      CARGO_TARGET_I686_LINUX_ANDROID_LINKER: joinPathAndAssertExistence(
+        toolchainBinPath,
+        `i686-linux-android${androidApiLevel}-clang${cmdMaybe}`,
+      ),
+      TARGET_CC: joinPathAndAssertExistence(
+        toolchainBinPath,
+        `${targetArch}-linux-${targetPlatform}-clang${cmdMaybe}`,
+      ),
+      TARGET_CXX: joinPathAndAssertExistence(
+        toolchainBinPath,
+        `${targetArch}-linux-${targetPlatform}-clang++${cmdMaybe}`,
+      ),
+      TARGET_AR: joinPathAndAssertExistence(
+        toolchainBinPath,
+        `llvm-ar${exeMaybe}`,
+      ),
+      TARGET_RANLIB: joinPathAndAssertExistence(
+        toolchainBinPath,
+        `llvm-ranlib${exeMaybe}`,
+      ),
+      ANDROID_NDK: ndkPath,
+      PATH: `${toolchainBinPath}:${process.env.PATH}`,
+    };
+  } else if (isAppleTarget(target)) {
+    const weakNodeApiFrameworkPath = getWeakNodeApiFrameworkPath(target);
+    assert(
+      fs.existsSync(weakNodeApiFrameworkPath),
+      `Expected weak-node-api framework at ${weakNodeApiFrameworkPath}`,
+    );
+    return {
+      CARGO_ENCODED_RUSTFLAGS: [
+        "-L",
+        `framework=${weakNodeApiFrameworkPath}`,
+        "-l",
+        "framework=weak-node-api",
+      ].join(String.fromCharCode(0x1f)),
+    };
+  } else {
+    throw new Error(`Unexpected target: ${target as string}`);
+  }
+}

@@ -1,0 +1,239 @@
+# react-native-node-api
+
+## 1.2.2
+
+### Patch Changes
+
+- ff237c0: Updated `@expo/plist` to `^0.10.1` (was pinned to `0.4.7`).
+- weak-node-api@0.1.1
+
+## 1.2.1
+
+### Patch Changes
+
+- 62f421b: Export `readAndParsePlist`, which reads an XML or binary plist, from the package's Node.js entrypoint.
+- weak-node-api@0.1.1
+
+## 1.2.0
+
+### Minor Changes
+
+- 44617d2: Add a `--fail-on-error` option to `react-native-node-api link`. By default,
+  unresolvable dependencies continue to be skipped with a warning; the new flag
+  instead surfaces the original package-resolution error and exits unsuccessfully,
+  which makes broken package `exports` configurations diagnosable in CI.
+
+### Patch Changes
+
+- 14e5119: Parse binary `Info.plist` files in-process with `bplist-parser` instead of
+  converting them with `plutil`, so reading a framework's plist no longer
+  rewrites the file or requires macOS.
+- 8d125fa: Preserve Node.js module resolution precedence when a JavaScript file and native addon share a basename: `require('./foo')` no longer gets rewritten to load a Node-API addon when a same-named `foo.js`/`.cjs`/`.mjs`/`.json` file exists alongside it, since that source file is what `require()` actually resolves to. An explicit `require('./foo.node')` is unaffected.
+- ba6a527: Log the original package resolution error during dependency scanning so invalid package entry points include the missing path.
+- c8d5b80: Declare the Node.js versions that support loading ESM from CommonJS so package
+  managers warn before the CLI loads its ESM dependencies on an incompatible
+  runtime.
+- weak-node-api@0.1.1
+
+## 1.1.3
+
+### Patch Changes
+
+- 7962f09: Stop emitting `log_debug`'s per-addon diagnostic chatter (library
+  found/loaded, symbol resolution, ...) in release builds. It is now compiled
+  out in `NDEBUG` builds (CMake's `Release`/`MinSizeRel`/`RelWithDebInfo`
+  configurations, and Xcode's default `Release` configuration), mirroring React
+  Native's own dev/release logging split. `log_warning` and `log_error` are
+  unaffected and keep firing in every build type.
+- 1d0e670: Make `vendor-hermes --silent` actually silent. The spinners were passed
+  `isEnabled: false`, which stops the animation but still writes the spinner text
+  and its final symbol to stderr. They now use `isSilent`, which suppresses the
+  output entirely, leaving the vendored Hermes path on stdout as the command's
+  only output.
+- weak-node-api@0.1.1
+
+## 1.1.2
+
+### Patch Changes
+
+- 294de3f: Upgrade `bufout` to v1.0.0, which keeps the number of listeners on the process
+  and the output streams constant regardless of how many children are spawned
+  concurrently: a single shared `exit`/`SIGINT` listener is attached only while
+  children are running, and every child pipes into one shared pass-through per
+  destination stream.
+
+  That removes the reason for the CLIs to raise `EventEmitter.defaultMaxListeners`
+  to 100, so those assignments are gone and Node's default limit again applies —
+  restoring the leak warning it exists to give.
+
+- Updated dependencies [294de3f]
+  - @react-native-node-api/cli-utils@0.1.5
+  - weak-node-api@0.1.1
+
+## 1.1.1
+
+### Patch Changes
+
+- 37e8081: Print module path on framework slicing failure
+- weak-node-api@0.1.1
+
+## 1.1.0
+
+### Minor Changes
+
+- 7349c34: Add support for building versioned frameworks for Apple Darwin / macOS
+- 80ae73b: Modify Xcode project to add a build phase to the main project app to link Node-API frameworks directly
+
+### Patch Changes
+
+- ea26287: Add support for source maps across CLI bins
+  - weak-node-api@0.1.1
+
+## 1.0.1
+
+### Patch Changes
+
+- 1dee80f: Fix missing build artifacts 🙈
+- Updated dependencies [1dee80f]
+  - @react-native-node-api/cli-utils@0.1.4
+  - weak-node-api@0.1.1
+
+## 1.0.0
+
+### Patch Changes
+
+- Updated dependencies [441dcc4]
+- Updated dependencies [3d2e03e]
+  - @react-native-node-api/cli-utils@0.1.3
+  - weak-node-api@0.1.0
+
+## 0.7.1
+
+### Patch Changes
+
+- 7ff2c2b: Fix minor package issues.
+- Updated dependencies [7ff2c2b]
+- Updated dependencies [7ff2c2b]
+  - weak-node-api@0.0.3
+  - @react-native-node-api/cli-utils@0.1.2
+
+## 0.7.0
+
+### Minor Changes
+
+- 61fff3f: Ensure proper escaping when generating a bundle identifier while creating an Apple framework
+- 60fae96: Use `find_package` instead of `include` to locate "weak-node-api"
+- 60fae96: No longer exporting weakNodeApiPath, import from "weak-node-api" instead
+
+### Patch Changes
+
+- 60fae96: Moved weak-node-api into a separate "weak-node-api" package.
+- 61fff3f: Allow passing --apple-bundle-identifier to specify the bundle identifiers used when creating Apple frameworks.
+- 5dea205: Add "apple" folder into the package (follow-up to #301)
+- eca721e: Don't instruct users to pass --force when vendoring hermes
+- Updated dependencies [60fae96]
+  - weak-node-api@0.0.2
+
+## 0.6.2
+
+### Patch Changes
+
+- 07ea9dc: Add x86_64 and universal simulator triplets
+- 7536c6c: Add --react-native-package option to "vendor-hermes" command, allowing caller to choose the package to download hermes into
+- c698698: Moved and simplify Apple host TurboModule
+- a2fd422: Detects "pod install" from React Native MacOS apps and vendors Hermes accordingly
+- bdc172e: Add explicit support for React Native v0.79.7
+- 4672e01: Warn on "pod install" with the new architecture disabled
+
+## 0.6.1
+
+### Patch Changes
+
+- 5c3de89: Rebuild any dSYM directory when linking frameworks.
+- bb9a78c: Fixed visualizing duplicate library names
+
+## 0.6.0
+
+### Minor Changes
+
+- 5156d35: Use of CMake targets producing Apple frameworks instead of free dylibs is now supported
+- 5016ed2: Scope is now stripped from package names when renaming libraries while linking
+
+### Patch Changes
+
+- acd06f2: Linking Node-API addons for Apple platforms is no longer re-creating Xcframeworks
+- 9f1a301: Fix requireNodeAddon return type
+- 5156d35: Refactored moving prettyPath util to CLI utils package
+- Updated dependencies [5156d35]
+  - @react-native-node-api/cli-utils@0.1.1
+
+## 0.5.2
+
+### Patch Changes
+
+- 2b9a538: Handle Info.plist lookup in versioned frameworks
+
+## 0.5.1
+
+### Patch Changes
+
+- 2a30d8d: Refactored CLIs to use a shared utility package
+- c72970f: Move REACT_NATIVE_OVERRIDE_HERMES_DIR out of tasks to fail earlier
+
+## 0.5.0
+
+### Minor Changes
+
+- 75aaed1: Add explicit support for React Native 0.81.2, 0.81.3 and 0.81.4
+- 90a1471: Assert that REACT_NATIVE_OVERRIDE_HERMES_DIR is set when Android / Gradle projects depend on the host package
+
+### Patch Changes
+
+- 90a1471: Fix auto-linking from Gradle builds on Windows
+
+## 0.4.0
+
+### Minor Changes
+
+- a0212c8: Add explicit support for React Native 0.81.1 (0.79.6, 0.80.0, 0.80.1, 0.80.2 & 0.81.0)
+
+### Patch Changes
+
+- a0212c8: Fix host library to not explicitly link with weak-node-api and instead rely on dlopen
+
+## 0.3.3
+
+### Patch Changes
+
+- a477b84: Added implementation of napi_fatal_error, napi_get_node_version and napi_get_version. Improved the Logger functionalities
+- dc33f3c: Added implementation of async work runtime functions
+- 4924f66: Refactor into a platform abstraction
+- acf1a7c: Treating failures when scanning filesystems for Node-API prebuilds more gracefully
+
+## 0.3.2
+
+### Patch Changes
+
+- 045e9e5: Fix hasDuplicateLibraryNames by filtering out node_modules in package rootse
+
+## 0.3.1
+
+### Patch Changes
+
+- 7ad62f7: Adding support for React Native 0.79.3, 0.79.4 & 0.79.5
+
+## 0.3.0
+
+### Minor Changes
+
+- bd733b8: Derive the tag used to clone the React Native fork bringing Node-API support from the .hermesversion file in the react-native package.
+
+### Patch Changes
+
+- b771a27: Removed unused Codegen related configurations.
+
+## 0.2.0
+
+### Minor Changes
+
+- 4379d8c: Initial release

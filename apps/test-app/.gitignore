@@ -1,0 +1,18 @@
+*.binlog
+*.hprof
+*.xcworkspace/
+*.zip
+.gradle/
+.kotlin/
+.idea/
+.vs/
+.xcode.env
+Pods/
+build/
+local.properties
+msbuild.binlog
+
+# Ignoring the Podfile.lock as the `react-native-node-api` hash updates too frequently
+Podfile.lock
+
+hermes/

@@ -1,0 +1,563 @@
+name: Check
+
+env:
+  CMAKE_VERSION: 4.1.2
+  # Version here should match the one in React Native template and packages/cmake-rn/src/cli.ts
+  NDK_VERSION: 27.1.12297006
+  # Enabling the Gradle test on CI (disabled by default because it downloads a lot)
+  ENABLE_GRADLE_TESTS: true
+  # pnpm records GitHub git dependencies (e.g. node-addon-examples) with an SSH
+  # repo URL, which anonymous CI runners can't clone. Rewrite git@github.com: to
+  # HTTPS so the public repo is fetched over HTTPS. Provided as ad-hoc git config
+  # via env so it applies to every job without a per-job step.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: "url.https://github.com/.insteadOf"
+  GIT_CONFIG_VALUE_0: "git@github.com:"
+
+on:
+  push:
+    branches:
+      - main
+      - next
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every job sets Node.js up before pnpm, which is the opposite of what pnpm's
+# own docs suggest. pnpm/action-setup v6 bootstraps pnpm by shelling out to
+# `npm ci`, and it finds npm on PATH — on our self-hosted Linux runner the only
+# npm there is the broken copy in the runner's own Node.js 24 externals, so the
+# setup step dies with "Cannot find module '../lib/cli.js'". Running setup-node
+# first puts a working npm ahead of it. The usual ordering exists so that
+# setup-node's `cache: pnpm` can shell out to `pnpm store path`; pnpm's own
+# `cache: true` caches the same store without needing pnpm to already exist.
+#
+# hendrikmuhs/ccache-action is pinned to an exact patch, not a floating major:
+# its v1 / v1.2 tags still point at a Node.js 20 build, which the runners now
+# warn about. Float again once upstream moves them to >= v1.2.22.
+#
+# pnpm/action-setup is likewise pinned to an exact tag: upstream's floating v6
+# hasn't been moved past v6.0.10 yet, one release behind v6.1.0 (adds pnpm v12
+# support). Move back to floating v6 once it catches up.
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+      - run: pnpm install
+      - run: pnpm run build
+      # Generate the TypeScript/C++ declarations that other packages' type-checking
+      # depends on, without building any native binaries: weak-node-api's
+      # "prebuild:prepare" only copies headers and runs codegen (needs clang-format,
+      # set up above, but no JDK/Android SDK/NDK). ferric-example's declarations are
+      # committed as a fixture instead (see packages/ferric-example/.gitignore) —
+      # napi-rs's dts generation has no way to run without a real `cargo build`
+      # (confirmed: it leaves a populated target/ directory), so unlike
+      # weak-node-api's codegen it can't be reproduced here without reintroducing a
+      # native build into the fastest-feedback job. See #414.
+      - run: pnpm --filter weak-node-api run prebuild:prepare
+      - run: pnpm run init-ferric-example
+      - name: Verify ferric-example matches what ferric init generates
+        run: |
+          git status --porcelain packages/ferric-example
+          git diff --exit-code packages/ferric-example
+          test -z "$(git status --porcelain packages/ferric-example)"
+      - run: pnpm run init-cmake-rn-example
+      - name: Verify cmake-rn-example matches what cmake-rn init generates
+        run: |
+          git status --porcelain packages/cmake-rn-example
+          git diff --exit-code packages/cmake-rn-example
+          test -z "$(git status --porcelain packages/cmake-rn-example)"
+      - run: pnpm run lint
+        env:
+          DEBUG: eslint:eslint
+      - run: pnpm run prettier:check
+      - run: pnpm run depcheck
+      - run: pnpm run publint
+  unit-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.runner }}
+    name: Unit tests (${{ matrix.runner }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          java-version: "17"
+          distribution: "temurin"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: tools platform-tools ndk;${{ env.NDK_VERSION }}
+      - run: rustup target add x86_64-linux-android aarch64-linux-android armv7-linux-androideabi i686-linux-android aarch64-apple-ios-sim x86_64-apple-ios
+      - run: pnpm install
+      - run: pnpm run bootstrap
+      - run: pnpm test
+  weak-node-api-tests:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' || contains(github.event.pull_request.labels.*.name, 'weak-node-api')
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.runner }}
+    name: Weak Node-API tests (${{ matrix.runner }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+      - run: pnpm install
+      - run: pnpm run build
+      - name: Prepare weak-node-api
+        run: pnpm --filter weak-node-api run prebuild:prepare
+      - name: Build and run weak-node-api C++ tests
+        run: |
+          cmake -S . -B build -DBUILD_TESTS=ON
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+        working-directory: packages/weak-node-api
+  host-cpp-tests:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' || contains(github.event.pull_request.labels.*.name, 'Host 🏡')
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.runner }}
+    name: Host C++ tests (${{ matrix.runner }})
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+      - run: pnpm install
+      - run: pnpm run build
+      - name: Prepare weak-node-api
+        run: pnpm --filter weak-node-api run prebuild:prepare
+      - name: Build and run react-native-node-api host C++ tests
+        run: |
+          cmake -S tests -B tests/build
+          cmake --build tests/build
+          ctest --test-dir tests/build --output-on-failure
+        working-directory: packages/host
+  test-ios:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' || contains(github.event.pull_request.labels.*.name, 'Apple 🍎')
+    name: Test app (iOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      # Device names change with every Xcode release, so pick one dynamically.
+      - name: Boot the simulator
+        run: |
+          SIMULATOR_UDID=$(xcrun simctl list devices available --json | node -e "
+            const { devices } = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+            const runtimes = Object.keys(devices).filter((r) => r.includes('iOS')).sort();
+            const device = runtimes.flatMap((r) => devices[r]).find((d) => d.name.startsWith('iPhone'));
+            if (!device) throw new Error('Found no available iPhone simulator');
+            console.log(device.udid);
+          ")
+          echo "Booting $SIMULATOR_UDID"
+          xcrun simctl bootstatus "$SIMULATOR_UDID" -b
+          echo "SIMULATOR_UDID=$SIMULATOR_UDID" >> $GITHUB_ENV
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+          # The action defaults to 500M, which a from-source React Native build
+          # fills mid-build: it evicted 88 times in one run, discarding most of
+          # what it had just cached.
+          max-size: 3G
+      - run: rustup target add aarch64-apple-ios-sim x86_64-apple-ios
+      - run: pnpm install
+      - run: pnpm run bootstrap
+        env:
+          CMAKE_RN_TRIPLETS: arm64;x86_64-apple-ios-sim
+          FERRIC_TARGETS: aarch64-apple-ios-sim,x86_64-apple-ios
+      - name: Verify prebuilds
+        run: pnpm --filter @react-native-node-api/node-addon-examples run verify
+      # Mirrors React Native's scripts/xcode/ccache.conf, which only applied
+      # while ccache ran through their wrapper script (it sets CCACHE_CONFIGPATH
+      # to it) and so no longer does now that it runs as a compiler launcher.
+      # Without this sloppiness Xcode's modules, PCH and index-store flags leave
+      # ccache treating almost every compile as uncacheable.
+      - name: Tune ccache for Xcode
+        run: |
+          ccache --set-config sloppiness=clang_index_store,file_stat_matches,include_file_ctime,include_file_mtime,ivfsoverlay,pch_defines,modules,system_headers,time_macros
+          ccache --set-config file_clone=true
+          ccache --set-config depend_mode=true
+          ccache --set-config inode_cache=true
+      # Hermes dominates the iOS build (17m15s of an 18m58s "Build test app"
+      # step, measured in #439) and only changes when the pinned commit does, so
+      # it is built once into an archive that `pod install` injects through
+      # HERMES_ENGINE_TARBALL_PATH. The archive name covers every input that
+      # changes its contents — the pinned commit, the React Native version whose
+      # JSI it is compiled against, the build type and the platforms — which
+      # makes it the cache key too.
+      - name: Resolve prebuilt Hermes name
+        id: hermes
+        run: echo "archive=$(pnpm exec react-native-node-api prebuilt-hermes --print name)" >> "$GITHUB_OUTPUT"
+        working-directory: apps/test-app
+      - name: Cache prebuilt Hermes
+        uses: actions/cache@v6
+        with:
+          path: ~/Library/Caches/react-native-node-api/hermes-prebuilt
+          key: ${{ steps.hermes.outputs.archive }}
+      # Explicit rather than left to `pod install`, so a cold cache shows up as
+      # its own step in the job log instead of as a mysteriously slow install.
+      - name: Build prebuilt Hermes
+        run: pnpm exec react-native-node-api prebuilt-hermes
+        working-directory: apps/test-app
+      # Must precede `pod install`: react-native-test-app embeds the resources
+      # declared in app.json when generating the workspace, skipping missing
+      # ones, and the app would then expect a Metro dev server at runtime.
+      # `--assets-dest dist` lands assets in dist/assets, as app.json expects.
+      - name: Bundle test app
+        run: pnpm exec react-native bundle --entry-file index.ts --platform ios --dev false --minify false --bundle-output dist/main.ios.jsbundle --assets-dest dist
+        working-directory: apps/test-app
+      # No USE_CCACHE: it points CC/CXX at React Native's ccache-clang.sh, whose
+      # bare `clang` resolves to setup-cpp's LLVM instead of Xcode's, breaking
+      # every system module. Ccache goes on the xcodebuild invocation instead.
+      #
+      # Retries the intermittent CocoaPods/CocoaPods#12866 "pathname contains
+      # null byte" crash, and only that. Drop once CocoaPods > 1.17.0 fixes it.
+      - name: Install pods
+        shell: bash
+        working-directory: apps/test-app
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm run pod-install 2>&1 | tee "$RUNNER_TEMP/pod-install.log"; then
+              exit 0
+            fi
+            if ! grep -q 'pathname contains null byte' "$RUNNER_TEMP/pod-install.log"; then
+              echo "::error::pod install failed for an unrelated reason"
+              exit 1
+            fi
+            echo "::warning::pod install hit CocoaPods/CocoaPods#12866 (attempt ${attempt}/3), retrying"
+          done
+          echo "::error::pod install kept failing with CocoaPods/CocoaPods#12866"
+          exit 1
+      # Raw xcodebuild output, not piped through xcbeautify — see #391.
+      # C_COMPILER_LAUNCHER keeps Xcode's own clang and just prefixes it with
+      # ccache; explicit modules needs opting in when a launcher is used.
+      - name: Build test app
+        run: xcodebuild archive -workspace ReactTestApp.xcworkspace -configuration Release -scheme ReactTestApp -destination "generic/platform=iOS Simulator" -archivePath ./build/test-app.xcarchive CODE_SIGN_IDENTITY="-" CODE_SIGNING_ALLOWED=YES C_COMPILER_LAUNCHER=ccache CLANG_ENABLE_EXPLICIT_MODULES_WITH_COMPILER_LAUNCHER=YES
+        working-directory: apps/test-app/ios
+      - name: Run test app
+        run: |
+          # Install the app
+          xcrun simctl install "$SIMULATOR_UDID" ./ios/build/test-app.xcarchive/Products/Applications/ReactTestApp.app
+          # Run Mocha Remote wrapping the launch of the app
+          pnpm exec mocha-remote --exit-on-error -- xcrun simctl launch --terminate-running-process --console-pty "$SIMULATOR_UDID" com.microsoft.ReactTestApp
+        working-directory: apps/test-app
+        env:
+          MOCHA_REMOTE_CONTEXT: allTests
+  test-macos:
+    # Disabling this on main for now, as initializing the template takes a long time and
+    # we don't have macOS-specific code yet. Currently also blocked on react-native-macos:
+    # https://github.com/callstackincubator/react-native-node-api/issues/392
+    if: contains(github.event.pull_request.labels.*.name, 'MacOS 💻')
+    name: Test app (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          java-version: "17"
+          distribution: "temurin"
+      - run: rustup target add x86_64-apple-darwin
+      - run: pnpm install
+      - run: pnpm run bootstrap
+        env:
+          CMAKE_RN_TRIPLETS: arm64;x86_64-apple-darwin
+          FERRIC_TARGETS: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: pnpm run init-macos-test-app
+      - run: pod install --project-directory=macos
+        working-directory: apps/macos-test-app
+      - name: Bundle test app
+        run: npx react-native bundle --entry-file index.js --platform macos --dev false --minify false --bundle-output dist/main.macos.jsbundle --assets-dest dist/res
+        working-directory: apps/macos-test-app
+      - name: Build test app
+        run: xcodebuild archive -workspace MacOSTestApp.xcworkspace -configuration Release -scheme MacOSTestApp-macOS -destination generic/platform="macOS" -archivePath ./build/macos-test-app.xcarchive
+        working-directory: apps/macos-test-app/macos
+      - name: Run test app
+        run: npx mocha-remote --exit-on-error -- macos/build/macos-test-app.xcarchive/Products/Applications/MacOSTestApp.app/Contents/MacOS/MacOSTestApp
+        working-directory: apps/macos-test-app
+        env:
+          MOCHA_REMOTE_CONTEXT: allTests
+  test-android:
+    # Temporarily gated to labeled PRs only: the ubuntu-self-hosted runner is
+    # offline, so running this on main pushes leaves the job queued forever and
+    # blocks the whole Check run from completing. Re-enable on main once the
+    # self-hosted runner is back. Tracked in #379.
+    if: contains(github.event.pull_request.labels.*.name, 'Android 🤖')
+    name: Test app (Android)
+    runs-on: ubuntu-self-hosted
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          java-version: "17"
+          distribution: "temurin"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: tools platform-tools ndk;${{ env.NDK_VERSION }} cmake;${{ env.CMAKE_VERSION }}
+      - run: rustup target add x86_64-linux-android aarch64-linux-android armv7-linux-androideabi i686-linux-android aarch64-apple-ios-sim
+      - run: pnpm install
+      - run: pnpm run bootstrap
+        env:
+          CMAKE_RN_TRIPLETS: x86_64-linux-android
+          FERRIC_TARGETS: x86_64-linux-android
+      - name: Clone patched Hermes version
+        shell: bash
+        run: |
+          REACT_NATIVE_OVERRIDE_HERMES_DIR=$(pnpm exec react-native-node-api vendor-hermes --silent)
+          echo "REACT_NATIVE_OVERRIDE_HERMES_DIR=$REACT_NATIVE_OVERRIDE_HERMES_DIR" >> $GITHUB_ENV
+        working-directory: apps/test-app
+      # - name: Setup Android Emulator cache
+      #   uses: actions/cache@v6
+      #   id: avd-cache
+      #   with:
+      #     path: |
+      #       ~/.android/avd/*
+      #       ~/.android/adb*
+      #     key: ${{ runner.os }}-avd-29
+      # See https://github.com/marketplace/actions/android-emulator-runner#running-hardware-accelerated-emulators-on-linux-runners
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Build weak-node-api for all Android architectures
+        run: pnpm --filter weak-node-api run prebuild:build:android
+      - name: Build ferric-example for all architectures
+        run: pnpm run build --android
+        working-directory: packages/ferric-example
+      - name: Verify committed ferric-example TypeScript declarations are up to date
+        run: git diff --exit-code -- ferric_example.d.ts ferric_example.js
+        working-directory: packages/ferric-example
+      - name: Run tests (Android)
+        timeout-minutes: 75
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          force-avd-creation: false
+          disable-animations: true
+          arch: x86_64
+          ndk: ${{ env.NDK_VERSION }}
+          cmake: 3.22.1
+          working-directory: apps/test-app
+          script: |
+            # Setup port forwarding to Mocha Remote
+            adb reverse tcp:8090 tcp:8090
+            # Uninstall the app if already in the snapshot (unlikely but could result in a signature mismatch failure)
+            adb uninstall com.microsoft.reacttestapp || true
+            # Start logcat in background and save logs
+            adb logcat > emulator-logcat.txt 2>&1 &
+            LOGCAT_PID=$!
+            # Build, install and run the app
+            pnpm run test:android:allTests --mode Release
+            # Wait a bit for the sub-process to terminate, before terminating the emulator
+            sleep 5
+            # Stop logcat
+            kill $LOGCAT_PID || true
+      - name: Upload device logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: emulator-logcat
+          path: apps/test-app/emulator-logcat.txt
+  test-ferric-apple-triplets:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next' || contains(github.event.pull_request.labels.*.name, 'Ferric 🦀')
+    name: Test ferric Apple triplets
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          java-version: "17"
+          distribution: "temurin"
+      - run: rustup target add x86_64-apple-darwin x86_64-apple-ios aarch64-apple-ios aarch64-apple-ios-sim
+      - run: rustup toolchain install nightly --component rust-src
+      - run: pnpm install
+      - run: pnpm run build
+      - name: Build weak-node-api for all Apple architectures
+        run: |
+          pnpm --filter weak-node-api run prebuild:prepare
+          pnpm --filter weak-node-api run prebuild:build:apple
+      # Build Ferric example for all Apple architectures
+      - run: pnpm exec ferric --apple
+        working-directory: packages/ferric-example
+      - name: Verify committed ferric-example TypeScript declarations are up to date
+        run: git diff --exit-code -- ferric_example.d.ts ferric_example.js
+        working-directory: packages/ferric-example
+      - name: Inspect the structure of the prebuilt binary
+        run: |
+          lipo -info ferric_example.apple.node/*/libferric_example.framework/libferric_example > lipo-output.txt
+          otool -L ferric_example.apple.node/*/libferric_example.framework/libferric_example > otool-output.txt
+        working-directory: packages/ferric-example
+      - name: Upload lipo output
+        uses: actions/upload-artifact@v7
+        with:
+          name: lipo-output
+          path: packages/ferric-example/lipo-output.txt
+      - name: Upload otool output
+        uses: actions/upload-artifact@v7
+        with:
+          name: otool-output
+          path: packages/ferric-example/otool-output.txt
+      - name: Verify Apple triplet builds
+        run: |
+          # Create expected fixture content
+          cat > expected-lipo-output.txt << 'EOF'
+          Architectures in the fat file: ferric_example.apple.node/ios-arm64_x86_64-simulator/libferric_example.framework/libferric_example are: x86_64 arm64 
+          Architectures in the fat file: ferric_example.apple.node/macos-arm64_x86_64/libferric_example.framework/libferric_example are: x86_64 arm64 
+          Architectures in the fat file: ferric_example.apple.node/tvos-arm64_x86_64-simulator/libferric_example.framework/libferric_example are: x86_64 arm64 
+          Non-fat file: ferric_example.apple.node/ios-arm64/libferric_example.framework/libferric_example is architecture: arm64
+          Non-fat file: ferric_example.apple.node/tvos-arm64/libferric_example.framework/libferric_example is architecture: arm64
+          Non-fat file: ferric_example.apple.node/xros-arm64-simulator/libferric_example.framework/libferric_example is architecture: arm64
+          Non-fat file: ferric_example.apple.node/xros-arm64/libferric_example.framework/libferric_example is architecture: arm64
+          EOF
+          # Compare with expected fixture (will fail if files differ)
+          diff expected-lipo-output.txt lipo-output.txt
+          # Verify every binary depends on the weak-node-api framework.
+          # otool -L prints one header line per file, or one per architecture
+          # when the file is fat, so the number of headers is exactly the number
+          # of weak-node-api dependencies we expect. Deriving it beats
+          # hard-coding a count, which silently rots whenever a triplet is added
+          # or dropped.
+          # macOS frameworks use the versioned bundle layout, so their install
+          # name is .../weak-node-api.framework/Versions/<version>/weak-node-api
+          # where the embedded platforms get the flat
+          # .../weak-node-api.framework/weak-node-api — hence the optional
+          # "Versions/<version>/" in the pattern.
+          SLICE_COUNT=$(grep -c "^ferric_example\.apple\.node/.*:$" otool-output.txt || true)
+          WEAK_NODE_API_COUNT=$(grep -cE "@rpath/weak-node-api\.framework/(Versions/[^/]+/)?weak-node-api" otool-output.txt || true)
+          echo "Found $WEAK_NODE_API_COUNT weak-node-api dependencies across $SLICE_COUNT binaries"
+          if [ "$SLICE_COUNT" -eq 0 ] || [ "$WEAK_NODE_API_COUNT" -ne "$SLICE_COUNT" ]; then
+            echo "Expected $SLICE_COUNT dependencies on the weak-node-api framework (one per binary), found $WEAK_NODE_API_COUNT"
+            cat otool-output.txt
+            exit 1
+          fi
+        working-directory: packages/ferric-example

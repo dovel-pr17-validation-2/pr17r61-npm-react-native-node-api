@@ -1,0 +1,23 @@
+
+# Vendored hermes
+hermes/
+
+# Vendored Node-API header files
+include/
+
+# Android build artifacts
+**/android/.cxx/
+**/android/build/
+
+# iOS build artifacts
+/auto-linked/
+
+# Android build artifacts
+android/.cxx/
+android/build/
+
+# Generated via `npm run generate-weak-node-api-injector`
+/cpp/WeakNodeApiInjector.cpp
+
+# C++ test build artifacts (see `npm run test:configure`)
+/tests/build/

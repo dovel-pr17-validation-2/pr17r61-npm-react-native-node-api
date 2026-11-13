@@ -1,0 +1,148 @@
+name: Hermes prebuilt
+
+# Builds the pinned Hermes for Apple platforms and publishes it as a release
+# asset, so `pod install` downloads it instead of compiling Hermes as part of
+# every app build. The asset is keyed by everything that changes its contents,
+# so a bumped pin publishes alongside the previous one rather than replacing it.
+
+env:
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: "url.https://github.com/.insteadOf"
+  GIT_CONFIG_VALUE_0: "git@github.com:"
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and re-upload even when the archive is already published
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+      - next
+    paths:
+      - "packages/host/src/node/cli/hermes.ts"
+      - "packages/host/src/node/cli/hermes-prebuilt.ts"
+      - ".github/workflows/hermes-prebuilt.yml"
+
+# Two runs publishing the same tag would race on creating the release.
+concurrency:
+  group: ${{ github.workflow }}
+
+jobs:
+  publish:
+    name: Publish prebuilt Hermes
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - run: pnpm install
+      - run: pnpm run build
+      # Resolved from the test app so the archive is built against the React
+      # Native version this repository actually pins.
+      # Each command substitution is assigned before it is echoed: inside
+      # `echo "x=$(cmd)"` the step's exit status is echo's, so a failing cmd
+      # passes the step with an empty value.
+      - name: Resolve prebuilt Hermes name
+        id: hermes
+        working-directory: apps/test-app
+        run: |
+          archive=$(pnpm exec react-native-node-api prebuilt-hermes --print name)
+          tag=$(pnpm exec react-native-node-api prebuilt-hermes --print tag)
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      # The paths filter above fires on any edit to these files, not just a
+      # bumped pin — and the archive name covers every input that changes its
+      # contents, so an asset already published under that name is exactly what
+      # this run would spend half an hour rebuilding. The Actions cache is not
+      # enough on its own: it is scoped to the branch that wrote it, and evicts
+      # after 7 days or under the repository's 10 GB cap.
+      - name: Look for an already-published archive
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.hermes.outputs.tag }}
+          ARCHIVE: ${{ steps.hermes.outputs.archive }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            echo "::notice::Forced: rebuilding $ARCHIVE regardless of what is published"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          elif gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+               --jq '.assets[].name' 2>/dev/null | grep -qxF "$ARCHIVE"; then
+            echo "::notice::$ARCHIVE is already published under $TAG — nothing to build"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Cache prebuilt Hermes
+        if: steps.published.outputs.exists != 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/Library/Caches/react-native-node-api/hermes-prebuilt
+          key: ${{ steps.hermes.outputs.archive }}
+      # --no-download so a re-run rebuilds rather than round-tripping the asset
+      # it is about to publish.
+      - name: Build prebuilt Hermes
+        id: build
+        if: steps.published.outputs.exists != 'true'
+        working-directory: apps/test-app
+        run: |
+          path=$(pnpm exec react-native-node-api prebuilt-hermes --no-download)
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+      # CMake reports a failed feature check as a bare "not found", with the
+      # compiler's actual complaint only in its configure log. Surface that log
+      # here so a failure is diagnosable without another round trip.
+      - name: Dump CMake configure log
+        if: failure() && steps.published.outputs.exists != 'true'
+        run: |
+          log=$(find "$PWD" -name CMakeConfigureLog.yaml -path '*build_host_hermesc*' | head -1)
+          if [ -z "$log" ]; then
+            echo "No CMakeConfigureLog.yaml found"
+            find "$PWD" -name 'CMakeError.log' -path '*build_host_hermesc*' -exec cat {} \;
+            exit 0
+          fi
+          echo "::group::Environment seen by CMake"
+          env | sort
+          xcode-select --print-path
+          xcrun --show-sdk-path || true
+          echo "::endgroup::"
+          echo "::group::unistd.h check"
+          grep -n -B 5 -A 45 'unistd\.h' "$log" | head -150
+          echo "::endgroup::"
+          echo "::group::atomics check"
+          grep -n -B 5 -A 60 'HAVE_CXX_ATOMICS_WITHOUT_LIB' "$log" | head -180
+          echo "::endgroup::"
+          cp "$log" "$RUNNER_TEMP/CMakeConfigureLog.yaml"
+      - name: Upload CMake configure log
+        if: failure() && steps.published.outputs.exists != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: hermesc-cmake-configure-log
+          path: ${{ runner.temp }}/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+      # --latest=false keeps these out of the "latest release" slot, which
+      # belongs to the package releases changesets publishes.
+      - name: Publish as a release asset
+        if: steps.published.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.hermes.outputs.tag }}
+          ARCHIVE_PATH: ${{ steps.build.outputs.path }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Prebuilt Hermes ($TAG)" \
+              --notes "Hermes, built for Apple platforms from the commit pinned in \`packages/host/src/node/cli/hermes.ts\`. Downloaded by \`react-native-node-api prebuilt-hermes\` and injected into the app's \`pod install\` through \`HERMES_ENGINE_TARBALL_PATH\`." \
+              --latest=false
+          fi
+          gh release upload "$TAG" "$ARCHIVE_PATH" --repo "$GITHUB_REPOSITORY" --clobber

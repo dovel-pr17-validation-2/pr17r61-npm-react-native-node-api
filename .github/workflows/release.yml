@@ -1,0 +1,149 @@
+name: Release
+
+env:
+  # Version here should match the one in React Native template and packages/cmake-rn/src/cli.ts
+  NDK_VERSION: 27.1.12297006
+  # pnpm records GitHub git dependencies (e.g. node-addon-examples) with an SSH
+  # repo URL, which anonymous CI runners can't clone. Rewrite git@github.com: to
+  # HTTPS so the public repo is fetched over HTTPS.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: "url.https://github.com/.insteadOf"
+  GIT_CONFIG_VALUE_0: "git@github.com:"
+
+on:
+  push:
+    branches:
+      - main
+      - next
+
+# Deliberately no workflow-level concurrency: a publish waiting for its
+# deployment approval would hold the group and keep every later push from
+# refreshing the "Version Packages" pull request until someone approves. The
+# two jobs that must not overlap carry their own groups instead.
+
+# Node.js is set up before pnpm, and hendrikmuhs/ccache-action and
+# pnpm/action-setup are pinned to exact versions rather than floating majors.
+# See the note in check.yml for why.
+
+jobs:
+  # changesets/action's sub-actions split the "what should happen?" decision out
+  # of the doing, which is what lets only the publish half sit behind the "main"
+  # environment. select-mode answers with 'version' (changesets are pending),
+  # 'publish' (no changesets and the registry is missing one of our versions) or
+  # 'none' — the last being every chore, docs and CI commit, which now finishes
+  # here instead of queuing a deployment approval for a no-op publish.
+  mode:
+    name: Select mode
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      # select-mode runs the locally installed @changesets/cli, so the workspace
+      # has to be installed before it.
+      - run: pnpm install
+
+      - id: select
+        uses: changesets/action/select-mode@v2
+        env:
+          # select-mode shells out to `changeset publish-plan`, which asks the
+          # registry which versions are missing — and that goes through
+          # `pnpm info`, so it needs the same escape hatch as publishing does.
+          # See the comment on the publish job below.
+          npm_config_force: true
+
+  # Opening (or updating) the "Version Packages" pull request touches nothing
+  # outside this repository, so it deliberately runs without the "main"
+  # environment: only the publish job below waits for a deployment approval.
+  version:
+    name: Version
+    needs: mode
+    if: needs.mode.outputs.mode == 'version'
+    runs-on: ubuntu-latest
+    concurrency: ${{ github.workflow }}-version-${{ github.ref }}
+    permissions:
+      contents: write # the version branch
+      pull-requests: write # the "Version Packages" pull request
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - run: pnpm install
+
+      - name: Create Release Pull Request
+        uses: changesets/action/version@v2
+
+  publish:
+    name: Publish
+    needs: mode
+    if: needs.mode.outputs.mode == 'publish'
+    runs-on: macos-latest
+    environment: main
+    concurrency:
+      group: ${{ github.workflow }}-publish-${{ github.ref }}
+      cancel-in-progress: false # never interrupt a release that is mid-flight
+    # Publishing to NPM happens through trusted publishing, which needs an OIDC
+    # token. Declaring permissions at all narrows them to exactly what is listed,
+    # so the one the changesets action already relied on is spelled out too.
+    permissions:
+      contents: write # git tags and GitHub releases
+      id-token: write # NPM trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/krypton
+      - uses: pnpm/action-setup@v6.1.0
+        with:
+          cache: true
+      - name: Setup cpp tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: true
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          java-version: "17"
+          distribution: "temurin"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: tools platform-tools ndk;${{ env.NDK_VERSION }}
+      - run: rustup target add x86_64-linux-android aarch64-linux-android armv7-linux-androideabi i686-linux-android aarch64-apple-ios-sim
+      - run: pnpm install
+
+      - name: Publish to NPM
+        uses: changesets/action/publish@v2
+        with:
+          script: pnpm run release
+        env:
+          # changeset publish detects the pnpm lockfile and correctly shells out
+          # to `pnpm info`/`pnpm pack`/`pnpm publish` instead of npm's — but
+          # `pnpm info` is itself a documented passthrough to the real npm CLI
+          # (confirmed by strace: `pnpm info <pkg>` execs `npm info <pkg>`), so
+          # it still runs into npm ≥ 11 validating this repo's own root
+          # package.json on every invocation and failing with EBADDEVENGINES
+          # (we declare devEngines.packageManager: pnpm, but the process
+          # running is npm). `pnpm pack`/`pnpm publish` don't shell out to npm
+          # and are unaffected. Passing force downgrades the devEngines error
+          # to a warning; this is pnpm's own `info` implementation, so there's
+          # no changesets- or pnpm-version bump that removes the need for it.
+          # Scoped to this step on purpose: as workflow-level env it would also
+          # reach `pnpm install`, where force means "recreate the lockfile".
+          npm_config_force: true

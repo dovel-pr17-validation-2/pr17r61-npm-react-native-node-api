@@ -1,0 +1,74 @@
+{
+  "name": "weak-node-api",
+  "version": "0.1.1",
+  "description": "A linkable and runtime-injectable Node-API",
+  "homepage": "https://github.com/callstackincubator/react-native-node-api",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/callstackincubator/react-native-node-api.git",
+    "directory": "packages/weak-node-api"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.test.d.ts.map",
+    "include",
+    "generated",
+    "build/Debug",
+    "build/Release",
+    "*.podspec",
+    "*.cmake"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "copy-node-api-headers": "tsx scripts/copy-node-api-headers.ts",
+    "generate": "tsx scripts/generate.ts",
+    "prebuild:prepare": "node --run copy-node-api-headers && node --run generate",
+    "prebuild:build": "cmake-rn --no-auto-link --no-weak-node-api-linkage --xcframework-extension",
+    "prebuild:build:android": "node --run prebuild:build -- --android",
+    "prebuild:build:apple": "node --run prebuild:build -- --apple",
+    "prebuild:build:all": "node --run prebuild:build -- --android --apple",
+    "test": "tsx --test --test-reporter=@reporters/github --test-reporter-destination=stdout --test-reporter=spec --test-reporter-destination=stdout src/node/**/*.test.ts src/node/*.test.ts",
+    "test:configure": "cmake -S . -B build-tests -DBUILD_TESTS=ON",
+    "test:build": "cmake --build build-tests",
+    "test:run": "ctest --test-dir build-tests --output-on-failure",
+    "bootstrap": "node --run prebuild:prepare && node --run prebuild:build",
+    "prerelease": "node --run prebuild:prepare && node --run prebuild:build:all"
+  },
+  "keywords": [
+    "react-native",
+    "napi",
+    "node-api",
+    "node-addon-api",
+    "native",
+    "addon",
+    "module",
+    "c",
+    "c++",
+    "bindings",
+    "buildtools",
+    "cmake"
+  ],
+  "author": {
+    "name": "Callstack",
+    "url": "https://github.com/callstackincubator"
+  },
+  "contributors": [
+    {
+      "name": "Kræn Hansen",
+      "url": "https://github.com/kraenhansen"
+    }
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "node-api-headers": "^1.5.0"
+  },
+  "devDependencies": {
+    "cmake-rn": "workspace:*",
+    "zod": "^4.1.11"
+  }
+}

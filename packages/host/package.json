@@ -1,0 +1,98 @@
+{
+  "name": "react-native-node-api",
+  "version": "1.2.2",
+  "description": "Node-API for React Native",
+  "homepage": "https://github.com/callstackincubator/react-native-node-api",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/callstackincubator/react-native-node-api.git",
+    "directory": "packages/host"
+  },
+  "main": "dist/react-native/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.19.0 <21 || >=22.12.0"
+  },
+  "bin": {
+    "react-native-node-api": "./bin/react-native-node-api.mjs"
+  },
+  "exports": {
+    ".": {
+      "node": "./dist/node/index.js",
+      "react-native": "./dist/react-native/index.js"
+    },
+    "./babel-plugin": "./dist/node/babel-plugin/index.js",
+    "./cli": "./dist/node/cli/run.js"
+  },
+  "files": [
+    "logo.svg",
+    "bin",
+    "dist",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.test.d.ts.map",
+    "cpp",
+    "android",
+    "!android/.cxx",
+    "!android/build",
+    "apple",
+    "include",
+    "babel-plugin.js",
+    "scripts/patch-hermes.rb",
+    "scripts/patch-xcode-project.rb",
+    "weak-node-api/**",
+    "!weak-node-api/build/",
+    "*.js",
+    "*.podspec"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "injector:generate": "node scripts/generate-injector.mts",
+    "test": "tsx --test --test-reporter=@reporters/github --test-reporter-destination=stdout --test-reporter=spec --test-reporter-destination=stdout src/node/**/*.test.ts src/node/*.test.ts",
+    "test:gradle": "ENABLE_GRADLE_TESTS=true node --run test",
+    "test:configure": "cmake -S tests -B tests/build",
+    "test:build": "cmake --build tests/build",
+    "test:run": "ctest --test-dir tests/build --output-on-failure",
+    "bootstrap": "node --run injector:generate",
+    "prerelease": "node --run injector:generate"
+  },
+  "keywords": [
+    "node-api",
+    "napi",
+    "node-addon-api",
+    "native",
+    "addon"
+  ],
+  "author": {
+    "name": "Callstack",
+    "url": "https://github.com/callstackincubator"
+  },
+  "contributors": [
+    {
+      "name": "Kræn Hansen",
+      "url": "https://github.com/kraenhansen"
+    }
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@bacons/xcode": "^1.0.0-alpha.29",
+    "@expo/plist": "^0.10.1",
+    "@react-native-node-api/cli-utils": "workspace:*",
+    "@xmldom/xmldom": "^0.8.11",
+    "bplist-parser": "^0.5.0",
+    "pkg-dir": "^8.0.0",
+    "read-pkg": "^9.0.1",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.26.10",
+    "@babel/types": "^7.27.0",
+    "@types/babel__core": "^7.20.5",
+    "fswin": "^3.24.829",
+    "weak-node-api": "workspace:*"
+  },
+  "peerDependencies": {
+    "@babel/core": "^7.26.10",
+    "react-native": "0.88.0-nightly-20260809-db662caea",
+    "weak-node-api": "workspace:*"
+  }
+}

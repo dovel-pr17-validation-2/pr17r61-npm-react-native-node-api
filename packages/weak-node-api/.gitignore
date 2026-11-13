@@ -1,0 +1,14 @@
+
+# Everything in weak-node-api is generated, except for the configurations
+# Generated and built via `npm run bootstrap`
+/build/
+/build-tests/
+/*.xcframework
+/*.android.node
+/generated/
+
+# Copied from node-api-headers by scripts/copy-node-api-headers.ts
+/include/
+
+# Clang cache
+/.cache/

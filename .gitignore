@@ -1,0 +1,15 @@
+.DS_Store
+
+node_modules/
+dist/
+
+*.tsbuildinfo
+
+# Treading the MacOS app as ephemeral
+apps/macos-test-app
+
+# Cache used by the rust analyzer
+target/rust-analyzer/
+
+# Compiler cache, populated when building native code with ccache
+.ccache/

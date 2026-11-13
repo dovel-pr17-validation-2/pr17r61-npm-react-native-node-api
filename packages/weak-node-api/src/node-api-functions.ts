@@ -1,0 +1,154 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import cp from "node:child_process";
+import { z } from "zod";
+
+import * as rawHeaders from "node-api-headers";
+
+const SymbolsPerInterface = z.object({
+  js_native_api_symbols: z.array(z.string()),
+  node_api_symbols: z.array(z.string()),
+});
+
+const NodeApiHeaders = z.object({
+  include_dir: z.string(),
+  def_paths: z.object({
+    js_native_api_def: z.string(),
+    node_api_def: z.string(),
+  }),
+  symbols: z.object({
+    v1: SymbolsPerInterface,
+    v2: SymbolsPerInterface,
+    v3: SymbolsPerInterface,
+    v4: SymbolsPerInterface,
+    v5: SymbolsPerInterface,
+    v6: SymbolsPerInterface,
+    v7: SymbolsPerInterface,
+    v8: SymbolsPerInterface,
+    v9: SymbolsPerInterface,
+    v10: SymbolsPerInterface,
+  }),
+});
+
+type NodeApiVersion = keyof z.infer<typeof NodeApiHeaders>["symbols"];
+
+export const nodeApiHeaders = NodeApiHeaders.parse(rawHeaders);
+
+const clangAstDump = z.object({
+  kind: z.literal("TranslationUnitDecl"),
+  inner: z.array(
+    z.object({
+      kind: z.string(),
+      name: z.string().optional(),
+      type: z
+        .object({
+          qualType: z.string(),
+        })
+        .optional(),
+    }),
+  ),
+});
+
+export function getNodeApiHeaderAST(version: NodeApiVersion) {
+  const output = cp.execFileSync(
+    "clang",
+    [
+      // Declare the Node API version
+      "-D",
+      `NAPI_VERSION=${version.replace(/^v/, "")}`,
+      // Pass the next option directly to the Clang frontend
+      "-Xclang",
+      // Ask the Clang frontend to dump the AST
+      "-ast-dump=json",
+      // Parse and analyze the source file but not compile it
+      "-fsyntax-only",
+      // Include from the node-api-headers package
+      `-I${nodeApiHeaders.include_dir}`,
+      path.join(nodeApiHeaders.include_dir, "node_api.h"),
+    ],
+    {
+      encoding: "utf-8",
+      // Emitting the AST can produce a lot of output
+      maxBuffer: 1024 * 1024 * 10,
+    },
+  );
+  const parsed = JSON.parse(output) as unknown;
+  return clangAstDump.parse(parsed);
+}
+
+export type FunctionDecl = {
+  name: string;
+  returnType: string;
+  noReturn: boolean;
+  argumentTypes: string[];
+  fallbackReturnStatement: string;
+};
+
+export function getNodeApiFunctions(version: NodeApiVersion = "v10") {
+  const root = getNodeApiHeaderAST(version);
+  assert.equal(root.kind, "TranslationUnitDecl");
+  assert(Array.isArray(root.inner));
+  const foundSymbols = new Set();
+
+  // Both interfaces are now sourced from the same host (hermesNapi provides
+  // every symbol), so there is no engine/runtime distinction to preserve.
+  const symbolsPerInterface = nodeApiHeaders.symbols[version];
+  const allSymbols = new Set([
+    ...symbolsPerInterface.js_native_api_symbols,
+    ...symbolsPerInterface.node_api_symbols,
+  ]);
+
+  const nodeApiFunctions: FunctionDecl[] = [];
+
+  for (const node of root.inner) {
+    const { name, kind } = node;
+    if (kind === "FunctionDecl" && name && allSymbols.has(name)) {
+      assert(name, "Expected a name");
+      foundSymbols.add(name);
+      assert(node.type, `Expected type for ${node.name}`);
+
+      const match = node.type.qualType.match(
+        /^(?<returnType>[^(]+) \((?<argumentTypes>[^)]+)\)/,
+      );
+      assert(
+        match && match.groups,
+        `Failed to parse function type: ${node.type.qualType}`,
+      );
+      const { returnType, argumentTypes } = match.groups;
+      assert(
+        returnType,
+        `Failed to get return type from ${node.type.qualType}`,
+      );
+      assert(
+        argumentTypes,
+        `Failed to get argument types from ${argumentTypes}`,
+      );
+      assert(
+        returnType === "napi_status" || returnType === "void",
+        `Expected return type to be napi_status, got ${returnType}`,
+      );
+
+      nodeApiFunctions.push({
+        name,
+        returnType,
+        noReturn: node.type.qualType.includes("__attribute__((noreturn))"),
+        argumentTypes: argumentTypes
+          .split(",")
+          .map((arg) => arg.trim().replace("_Bool", "bool")),
+        fallbackReturnStatement:
+          returnType === "void"
+            ? "abort();"
+            : "return napi_status::napi_generic_failure;",
+      });
+    }
+  }
+  for (const knownSymbol of allSymbols) {
+    if (!foundSymbols.has(knownSymbol)) {
+      throw new Error(
+        `Missing symbol '${knownSymbol}' in the AST for Node API ${version}`,
+      );
+    }
+  }
+
+  return nodeApiFunctions;
+}

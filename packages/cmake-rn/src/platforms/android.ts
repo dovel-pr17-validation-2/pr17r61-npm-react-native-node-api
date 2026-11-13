@@ -1,0 +1,346 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  chalk,
+  Option,
+  oraPromise,
+  prettyPath,
+} from "@react-native-node-api/cli-utils";
+import {
+  createAndroidLibsDirectory,
+  AndroidTriplet as Triplet,
+} from "react-native-node-api";
+import * as cmakeFileApi from "cmake-file-api";
+
+import type { BaseOpts, Platform } from "./types.js";
+import { getArtifactName, toDefineArguments } from "../helpers.js";
+import {
+  getCmakeJSVariables,
+  getWeakNodeApiVariables,
+} from "../weak-node-api.js";
+import { isNinjaAvailable } from "../ninja.js";
+
+// This should match https://github.com/react-native-community/template/blob/main/template/android/build.gradle#L7
+const DEFAULT_NDK_VERSION = "27.1.12297006";
+const DEFAULT_ANDROID_SDK_VERSION = "24";
+
+type AndroidArchitecture = "armeabi-v7a" | "arm64-v8a" | "x86" | "x86_64";
+
+export const ANDROID_ARCHITECTURES = {
+  "armv7a-linux-androideabi": "armeabi-v7a",
+  "aarch64-linux-android": "arm64-v8a",
+  "i686-linux-android": "x86",
+  "x86_64-linux-android": "x86_64",
+} satisfies Record<Triplet, AndroidArchitecture>;
+
+const ndkVersionOption = new Option(
+  "--ndk-version <version>",
+  "The NDK version to use for Android builds",
+).default(DEFAULT_NDK_VERSION);
+
+const androidSdkVersionOption = new Option(
+  "--android-sdk-version <version>",
+  "The Android SDK version to use for Android builds",
+).default(DEFAULT_ANDROID_SDK_VERSION);
+
+type AndroidOpts = { ndkVersion: string; androidSdkVersion: string };
+
+function getBuildPath(
+  baseBuildPath: string,
+  triplet: Triplet,
+  configuration: BaseOpts["configuration"],
+) {
+  return path.join(baseBuildPath, triplet + "-" + configuration);
+}
+
+function getNdkPath(ndkVersion: string) {
+  const { ANDROID_HOME } = process.env;
+  assert(typeof ANDROID_HOME === "string", "Missing env variable ANDROID_HOME");
+  assert(
+    fs.existsSync(ANDROID_HOME),
+    `Expected the Android SDK at ${ANDROID_HOME}`,
+  );
+  const installNdkCommand = `sdkmanager --install "ndk;${ndkVersion}"`;
+  const ndkPath = path.resolve(ANDROID_HOME, "ndk", ndkVersion);
+  assert(
+    fs.existsSync(ndkPath),
+    `Missing Android NDK v${ndkVersion} (at ${ndkPath}) - run: ${installNdkCommand}`,
+  );
+  return ndkPath;
+}
+
+function getNdkToolchainPath(ndkPath: string) {
+  const toolchainPath = path.join(
+    ndkPath,
+    "build/cmake/android.toolchain.cmake",
+  );
+  assert(
+    fs.existsSync(toolchainPath),
+    `No CMake toolchain found in ${toolchainPath}`,
+  );
+  return toolchainPath;
+}
+
+function getNdkLlvmBinPath(ndkPath: string) {
+  const prebuiltPath = path.join(ndkPath, "toolchains/llvm/prebuilt");
+  const platforms = fs.readdirSync(prebuiltPath);
+  assert(
+    platforms.length === 1,
+    `Expected a single llvm prebuilt toolchain in ${prebuiltPath}`,
+  );
+  return path.join(prebuiltPath, platforms[0], "bin");
+}
+
+const DEFAULT_ANDROID_STL = "c++_shared";
+
+/**
+ * Builds the list of CMake cache variable definitions common to every
+ * triplet's configure step.
+ *
+ * `define` (populated from the repeatable `-D`/`--define` CLI option) is
+ * spread last, so a consumer's explicit `-D ANDROID_STL=c++_static` (or any
+ * other variable set here by default) takes precedence over our own
+ * defaults: CMake resolves a cache variable passed multiple times via `-D`
+ * to its last occurrence on the command line.
+ */
+export function buildCommonDefinitions({
+  configuration,
+  ndkPath,
+  androidSdkVersion,
+  ccachePath,
+  define,
+}: {
+  configuration: BaseOpts["configuration"];
+  ndkPath: string;
+  androidSdkVersion: string;
+  ccachePath: BaseOpts["ccachePath"];
+  define: BaseOpts["define"];
+}) {
+  return [
+    {
+      CMAKE_BUILD_TYPE: configuration,
+      CMAKE_SYSTEM_NAME: "Android",
+      // "CMAKE_INSTALL_PREFIX": installPath,
+      ANDROID_NDK: ndkPath,
+      ANDROID_TOOLCHAIN: "clang",
+      ANDROID_PLATFORM: androidSdkVersion,
+      // Defaults to c++_shared, matching what React Native itself uses.
+      // Override with -D/--define ANDROID_STL=c++_static (or another value
+      // accepted by the NDK's CMake toolchain) when an addon must match a
+      // prebuilt third-party dependency's STL.
+      ANDROID_STL: DEFAULT_ANDROID_STL,
+    },
+    ccachePath
+      ? {
+          CMAKE_C_COMPILER_LAUNCHER: ccachePath,
+          CMAKE_CXX_COMPILER_LAUNCHER: ccachePath,
+        }
+      : {},
+    ...define,
+  ];
+}
+
+export const platform: Platform<Triplet[], AndroidOpts> = {
+  id: "android",
+  name: "Android",
+  triplets: [
+    "aarch64-linux-android",
+    "armv7a-linux-androideabi",
+    "i686-linux-android",
+    "x86_64-linux-android",
+  ],
+  defaultTriplets(mode) {
+    if (mode === "all") {
+      return [...this.triplets];
+    } else if (mode === "current-development") {
+      // We're applying a heuristic to determine the current simulators
+      // TODO: Run a command to probe the currently running emulators instead
+      if (process.arch === "arm64") {
+        return ["aarch64-linux-android"];
+      } else if (process.arch === "x64") {
+        return ["x86_64-linux-android"];
+      } else {
+        return [];
+      }
+    } else {
+      throw new Error(`Unexpected mode: ${mode as string}`);
+    }
+  },
+  amendCommand(command) {
+    return command
+      .addOption(ndkVersionOption)
+      .addOption(androidSdkVersionOption);
+  },
+  assertValidTriplets() {},
+  async configure(
+    triplets,
+    {
+      configuration,
+      ndkVersion,
+      androidSdkVersion,
+      source,
+      define,
+      build,
+      weakNodeApiLinkage,
+      cmakeJs,
+      ccachePath,
+    },
+  ) {
+    const ndkPath = getNdkPath(ndkVersion);
+    const toolchainPath = getNdkToolchainPath(ndkPath);
+
+    const commonDefinitions = buildCommonDefinitions({
+      configuration,
+      ndkPath,
+      androidSdkVersion,
+      ccachePath,
+      define,
+    });
+
+    const generator = isNinjaAvailable() ? "Ninja" : "Unix Makefiles";
+    if (generator !== "Ninja") {
+      console.log(
+        `Ninja not found, using ${generator}. ${chalk.dim("Install Ninja for faster builds.")}`,
+      );
+    }
+
+    await Promise.all(
+      triplets.map(async ({ triplet, spawn }) => {
+        const buildPath = getBuildPath(build, triplet, configuration);
+        // We want to use the CMake File API to query information later
+        await cmakeFileApi.createSharedStatelessQuery(
+          buildPath,
+          "codemodel",
+          "2",
+        );
+
+        await spawn("cmake", [
+          "-S",
+          source,
+          "-B",
+          buildPath,
+          // Ideally, we would use the "Ninja Multi-Config" generator here,
+          // but it doesn't support the "RelWithDebInfo" configuration on Android.
+          "-G",
+          generator,
+          "--toolchain",
+          toolchainPath,
+          ...toDefineArguments([
+            ...(weakNodeApiLinkage ? [getWeakNodeApiVariables(triplet)] : []),
+            ...(cmakeJs ? [getCmakeJSVariables(triplet)] : []),
+            ...commonDefinitions,
+            {
+              // "CPACK_SYSTEM_NAME": `Android-${architecture}`,
+              ANDROID_ABI: ANDROID_ARCHITECTURES[triplet],
+            },
+          ]),
+        ]);
+      }),
+    );
+  },
+  async build({ triplet, spawn }, { target, build, configuration }) {
+    const buildPath = getBuildPath(build, triplet, configuration);
+    await spawn("cmake", [
+      "--build",
+      buildPath,
+      ...(target.length > 0 ? ["--target", ...target] : []),
+    ]);
+  },
+  isSupportedByHost() {
+    const { ANDROID_HOME } = process.env;
+    return typeof ANDROID_HOME === "string" && fs.existsSync(ANDROID_HOME);
+  },
+  async postBuild(
+    resolveOutputPath,
+    triplets,
+    { autoLink, configuration, target, build, strip, ndkVersion },
+  ) {
+    // Keyed by CMake target name, which CMake guarantees to be unique within a
+    // project. The artifact name is not: every addon of a multi-addon project
+    // may well build an "addon.node".
+    const prebuilds: Record<
+      string,
+      {
+        artifactName: string;
+        targetSourceDir: string;
+        libraries: { triplet: Triplet; libraryPath: string }[];
+      }
+    > = {};
+
+    for (const { triplet, spawn } of triplets) {
+      const buildPath = getBuildPath(build, triplet, configuration);
+      assert(fs.existsSync(buildPath), `Expected a directory at ${buildPath}`);
+      const targets = await cmakeFileApi.readCurrentTargetsDeep(
+        buildPath,
+        configuration,
+        "2.0",
+      );
+      const sharedLibraries = targets.filter(
+        ({ type, name }) =>
+          type === "SHARED_LIBRARY" &&
+          (target.length === 0 || target.includes(name)),
+      );
+      await Promise.all(
+        sharedLibraries.map(async (sharedLibrary) => {
+          const { artifacts } = sharedLibrary;
+          assert(
+            artifacts && artifacts.length === 1,
+            "Expected exactly one artifact",
+          );
+          const [artifact] = artifacts;
+          // Add prebuild entry, creating a new entry if needed
+          if (!(sharedLibrary.name in prebuilds)) {
+            prebuilds[sharedLibrary.name] = {
+              artifactName: getArtifactName(artifact.path),
+              targetSourceDir: sharedLibrary.paths.source,
+              libraries: [],
+            };
+          }
+          const libraryPath = path.join(buildPath, artifact.path);
+          assert(
+            fs.existsSync(libraryPath),
+            `Expected built library at ${libraryPath}`,
+          );
+
+          if (strip) {
+            const llvmBinPath = getNdkLlvmBinPath(getNdkPath(ndkVersion));
+            const stripToolPath = path.join(llvmBinPath, `llvm-strip`);
+            assert(
+              fs.existsSync(stripToolPath),
+              `Expected llvm-strip to exist at ${stripToolPath}`,
+            );
+            await spawn(stripToolPath, [libraryPath]);
+          }
+          prebuilds[sharedLibrary.name].libraries.push({
+            triplet,
+            libraryPath,
+          });
+        }),
+      );
+    }
+
+    for (const { artifactName, targetSourceDir, libraries } of Object.values(
+      prebuilds,
+    )) {
+      const prebuildOutputPath = path.resolve(
+        resolveOutputPath(targetSourceDir),
+        `${artifactName}.android.node`,
+      );
+      await oraPromise(
+        createAndroidLibsDirectory({
+          outputPath: prebuildOutputPath,
+          libraries,
+          autoLink,
+        }),
+        {
+          text: `Assembling Android libs directory (${artifactName})`,
+          successText: `Android libs directory (${artifactName}) assembled into ${prettyPath(prebuildOutputPath)}`,
+          failText: ({ message }) =>
+            `Failed to assemble Android libs directory (${artifactName}): ${message}`,
+        },
+      );
+    }
+  },
+};
